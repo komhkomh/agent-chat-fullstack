@@ -61,3 +61,30 @@ print(f"   总耗时: {time.perf_counter() - t0:.1f} 秒（又变回3秒了！�
 #
 # 什么时候有用：I/O 密集（网络请求、DB查询、读写文件）
 # 什么时候没用：CPU 密集（图像处理、大量计算）→ 那需要多进程
+
+# ========== ✏️ 课后练习 ==========
+# 【练习1】不同耗时的并发
+#   改造 io_task_async 支持自定义耗时，然后并发 5 个任务：
+#   耗时分别为 0.5 / 1 / 1.5 / 2 / 2.5 秒
+#   预测并验证：总耗时是多少？（提示：不是加起来）
+#   参考骨架：
+#     async def io_task_async(name, seconds):
+#         await asyncio.sleep(seconds)
+#         return f"{name} 完成（{seconds}s）"
+#     t0 = time.perf_counter()
+#     results = asyncio.run(asyncio.gather(*[
+#         io_task_async(f"任务{i}", s) for i, s in enumerate([0.5, 1, 1.5, 2, 2.5], 1)
+#     ]))
+#     print(results)
+#     print(f"总耗时: {time.perf_counter() - t0:.1f} 秒")
+#
+# 【练习2】gather 的返回值
+#   打印练习1里 results 的内容，观察：
+#   返回值的顺序是"完成顺序"还是"传入顺序"？
+#   （任务1耗时最短先完成，它在结果的哪个位置？把答案注释在代码里）
+#
+# 【练习3】（思考）为什么 CPU 密集任务用 async 没用？
+#   把 io_task_async 里的 await asyncio.sleep(1) 换成：
+#     sum(i * i for i in range(10_000_000))   # 纯计算，没有 await 让出点
+#   用 gather 并发 3 个，预测总耗时并验证。
+#   结合"事件循环单线程"和上面的 GIL 讲解，注释写下你的结论。
