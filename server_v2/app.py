@@ -78,7 +78,7 @@ import urllib.request
 from fastapi.responses import StreamingResponse
 from .redis_client import allow_request
 
-OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/chat")  # 容器里注入 host.docker.internal
 MODEL = "qwen2.5:3b"
 
 class ChatReq(BaseModel):
