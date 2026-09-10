@@ -111,3 +111,102 @@ def chat_stream(req: ChatReq, username: str = Depends(rate_limit_guard)):
     messages += req.history[-10:]            # 只带最近10条历史（上下文控制）
     messages.append({"role": "user", "content": req.message})
     return StreamingResponse(sse_chat(messages), media_type="text/event-stream")
+
+# ============================================================
+# Step3: 聊天历史持久化（按用户隔离）
+# ============================================================
+from datetime import datetime, timezone
+
+class ChatSession(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    title: str
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+class Message(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    session_id: int = Field(foreign_key="chatsession.id", index=True)
+    role: str          # "user" | "assistant"
+    content: str
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+class ChatReqV2(BaseModel):
+    message: str
+    session_id: int | None = None   # 不带 = 新会话
+
+def get_owned_session(session_id: int, username: str, s: Session) -> ChatSession:
+    """查会话 + 校验归属（防 IDOR：不能靠猜 ID 看别人的聊天记录）"""
+    session = s.get(ChatSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    user = s.exec(select(User).where(User.username == username)).first()
+    if session.user_id != user.id:
+        raise HTTPException(status_code=403, detail="无权访问该会话")
+    return session
+
+def sse_chat_persist(messages: list[dict], session_id: int):
+    """流式输出 + 边流边累积，结束后落库"""
+    full = []
+    yield f"data: {json.dumps({'session_id': session_id})}\n\n"   # 先告诉前端会话ID
+    req = urllib.request.Request(
+        OLLAMA_URL,
+        data=json.dumps({"model": MODEL, "messages": messages, "stream": True}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        for line in resp:
+            chunk = json.loads(line)
+            if content := chunk.get("message", {}).get("content"):
+                full.append(content)
+                yield f"data: {json.dumps({'content': content}, ensure_ascii=False)}\n\n"
+    # 流结束后：assistant 回复落库
+    with Session(engine) as s:
+        s.add(Message(session_id=session_id, role="assistant", content="".join(full)))
+        s.commit()
+    yield 'data: {"done": true}\n\n'
+
+@app.post("/v2/chat/stream")
+def chat_stream_v2(req: ChatReqV2, username: str = Depends(rate_limit_guard)):
+    with Session(engine) as s:
+        # ① 确定会话（新/旧）+ 校验归属
+        if req.session_id is None:
+            user = s.exec(select(User).where(User.username == username)).first()
+            session = ChatSession(user_id=user.id, title=req.message[:20])
+            s.add(session)
+            s.commit()
+            s.refresh(session)
+            history = []
+        else:
+            session = get_owned_session(req.session_id, username, s)
+            rows = s.exec(
+                select(Message).where(Message.session_id == session.id).order_by(Message.id)
+            ).all()
+            history = [{"role": m.role, "content": m.content} for m in rows]
+        # ② 用户消息落库
+        s.add(Message(session_id=session.id, role="user", content=req.message))
+        s.commit()
+        session_id = session.id
+
+    messages = [{"role": "system", "content": "你是一个简洁的助手"}]
+    messages += history[-10:]
+    messages.append({"role": "user", "content": req.message})
+    return StreamingResponse(sse_chat_persist(messages, session_id), media_type="text/event-stream")
+
+@app.get("/sessions")
+def list_sessions(username: str = Depends(get_current_user)):
+    """只返回【当前用户】的会话列表（WHERE user_id = 我）"""
+    with Session(engine) as s:
+        user = s.exec(select(User).where(User.username == username)).first()
+        rows = s.exec(
+            select(ChatSession).where(ChatSession.user_id == user.id).order_by(ChatSession.id.desc())
+        ).all()
+        return {"data": [{"id": r.id, "title": r.title, "created_at": r.created_at} for r in rows]}
+
+@app.get("/sessions/{session_id}/messages")
+def get_session_messages(session_id: int, username: str = Depends(get_current_user)):
+    with Session(engine) as s:
+        get_owned_session(session_id, username, s)   # 先验归属
+        rows = s.exec(
+            select(Message).where(Message.session_id == session_id).order_by(Message.id)
+        ).all()
+        return {"data": [{"role": m.role, "content": m.content} for m in rows]}
