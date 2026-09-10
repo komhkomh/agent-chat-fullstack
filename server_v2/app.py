@@ -67,3 +67,47 @@ def login(req: AuthReq):
 @app.get("/me")
 def get_me(username: str = Depends(get_current_user)):
     return {"message": f"你好，{username}（JWT 验证通过，没查数据库）"}
+
+# ============================================================
+# Step2: 聊天接口（JWT 守卫 + Redis 限流 + SSE 流式）
+# ============================================================
+import json
+import urllib.request
+
+from fastapi.responses import StreamingResponse
+from .redis_client import allow_request
+
+OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
+MODEL = "qwen2.5:3b"
+
+class ChatReq(BaseModel):
+    message: str
+    history: list[dict] = []
+
+def rate_limit_guard(username: str = Depends(get_current_user)) -> str:
+    """依赖链：先验 JWT，再查限流（Depends 里套 Depends）"""
+    if not allow_request(username, limit=20, window=60):
+        raise HTTPException(status_code=429, detail="请求太频繁，请稍后再试")
+    return username
+
+def sse_chat(messages: list[dict]):
+    """生成器：逐行读 Ollama 流式响应，包装成 SSE 格式"""
+    req = urllib.request.Request(
+        OLLAMA_URL,
+        data=json.dumps({"model": MODEL, "messages": messages, "stream": True}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        for line in resp:
+            chunk = json.loads(line)
+            if content := chunk.get("message", {}).get("content"):
+                yield f"data: {json.dumps({'content': content}, ensure_ascii=False)}\n\n"
+    yield 'data: {"done": true}\n\n'
+
+@app.post("/chat/stream")
+def chat_stream(req: ChatReq, username: str = Depends(rate_limit_guard)):
+    """守卫链：JWT 401 → 限流 429 → 放行"""
+    messages = [{"role": "system", "content": "你是一个简洁的助手"}]
+    messages += req.history[-10:]            # 只带最近10条历史（上下文控制）
+    messages.append({"role": "user", "content": req.message})
+    return StreamingResponse(sse_chat(messages), media_type="text/event-stream")
