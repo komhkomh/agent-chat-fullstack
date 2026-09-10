@@ -19,7 +19,8 @@ class User(SQLModel, table=True):
     password_hash: str
     salt: str
 
-engine = create_engine("sqlite:///server_v2.db")
+import os
+engine = create_engine(os.getenv("DB_URL", "sqlite:///server_v2.db"))  # 测试用 env 注入独立库
 
 @app.on_event("startup")
 def init_db():
